@@ -153,26 +153,13 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Unauthorized.")
         return
 
-    await update.message.reply_text("Restarting bot process...")
-
-    # Small delay so the reply actually sends before we die
+    await update.message.reply_text("Restarting...")
+    Path("/tmp/claudegram_restart_chat").write_text(str(update.effective_chat.id))
     await asyncio.sleep(1)
 
-    # This will kill our own process; systemd will restart it
-    proc = await asyncio.create_subprocess_exec(
+    await asyncio.create_subprocess_exec(
         "sudo", "systemctl", "restart", "claudegram",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
-
-    # If we get here, the restart didn't kill us (e.g. sudo failed)
-    if proc.returncode != 0:
-        err = stderr.decode().strip()
-        await update.message.reply_text(
-            f"Restart failed (exit {proc.returncode}):\n<code>{err}</code>",
-            parse_mode=ParseMode.HTML,
-        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

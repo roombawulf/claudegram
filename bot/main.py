@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
@@ -54,6 +55,15 @@ async def post_init(app: Application) -> None:
         config.workspace_dir,
         config.allowed_user_ids,
     )
+
+    restart_file = Path("/tmp/claudegram_restart_chat")
+    if restart_file.exists():
+        try:
+            chat_id = int(restart_file.read_text().strip())
+            await app.bot.send_message(chat_id, "Restarted.")
+        except Exception:
+            pass
+        restart_file.unlink(missing_ok=True)
 
 
 async def post_shutdown(app: Application) -> None:
