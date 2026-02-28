@@ -1,0 +1,18 @@
+[Unit]
+Description=Claude Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=claude-bot
+Group=claude-bot
+WorkingDirectory=/opt/claude-telegram
+EnvironmentFile=/opt/claude-telegram/.env
+ExecStart=/opt/claude-telegram/venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

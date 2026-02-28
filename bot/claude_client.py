@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import logging
+import platform
+import socket
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+import anthropic
+
+from .config import Config
+from .cost_tracker import log_usage
+from .memory import Memory
+from .tools import BashSession, TextEditorHandler, execute_tool, get_tool_definitions
+
+logger = logging.getLogger(__name__)
+
+# Server-side tools - we don't execute these, Anthropic does
+SERVER_TOOLS = {"web_search", "web_fetch"}
+
+
+class ClaudeClient:
+    """Wraps the Anthropic async client with caching, streaming, and tool loop."""
+
+    def __init__(self, config: Config, db, memory: Memory):
+        self.config = config
+        self.db = db
+        self.memory = memory
+        self.client = anthropic.AsyncAnthropic(api_key=config.anthropic_api_key)
+        self.tools = get_tool_definitions()
+
+        # Per-user tool sessions
+        self._bash_sessions: dict[int, BashSession] = {}
+        self._text_editors: dict[int, TextEditorHandler] = {}
+
+    def _get_bash_session(self, user_id: int) -> BashSession:
+        if user_id not in self._bash_sessions:
+            self._bash_sessions[user_id] = BashSession(self.config.workspace_dir)
+        return self._bash_sessions[user_id]
+
+    def _get_text_editor(self, user_id: int) -> TextEditorHandler:
+        if user_id not in self._text_editors:
+            allowed = []
+            if self.config.bot_source_dir:
+                allowed.append(self.config.bot_source_dir)
+            self._text_editors[user_id] = TextEditorHandler(
+                self.config.workspace_dir, allowed_paths=allowed
+            )
+        return self._text_editors[user_id]
+
+    def _build_system_prompt(self) -> list[dict]:
+        """Build system prompt with memory and environment context."""
+        memory_text = self.memory.format_for_prompt()
+
+        # List workspace contents
+        workspace = self.config.workspace_dir
+        workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            entries = sorted(workspace.iterdir())[:50]
+            workspace_listing = "\n".join(
+                f"  {'dir ' if e.is_dir() else 'file'} {e.name}" for e in entries
+            )
+        except OSError:
+            workspace_listing = "  (unable to list)"
+
+        # Build self-awareness section if source dir is configured
+        source_section = ""
+        source_dir = self.config.bot_source_dir
+        if source_dir and source_dir.exists():
+            source_section = f"""
+## Your Own Source Code
+You ARE this bot. Your source code lives at: {source_dir}
+The text editor tool has access to this directory — you can view and edit your own code.
+You can also use bash to run git commands in that directory.
+
+Key files:
+  bot/main.py              — Entry point, handler registration
+  bot/config.py            — Config dataclass, env var loading
+  bot/claude_client.py     — THIS system prompt, streaming, tool loop (you are here)
+  bot/telegram_handler.py  — Telegram command & message handlers
+  bot/streaming.py         — Telegram message edit manager
+  bot/conversation.py      — Message history, summarization
+  bot/tools.py             — BashSession, TextEditorHandler, tool definitions
+  bot/formatting.py        — Markdown to Telegram HTML conversion
+  bot/model_router.py      — Haiku/Sonnet classification heuristic
+  bot/cost_tracker.py      — Token pricing, usage logging
+  bot/memory.py            — Persistent memory (memory.json)
+  bot/database.py          — SQLite schema and helpers
+  requirements.txt         — Python dependencies
+  install.sh               — VPS deployment script
+  claude-telegram.service  — systemd unit file
+
+### Self-Modification Guidelines
+- You can edit any of these files to fix bugs, add features, or improve yourself.
+- After editing, commit and push with: `cd {source_dir} && git add -A && git commit -m "description" && git push`
+- To apply changes, restart yourself: `sudo systemctl restart claude-telegram`
+  (Note: this will end the current response. Tell the user you're restarting first.)
+- Always explain what you're changing and why before making edits.
+- Test changes mentally before applying — there's no staging environment.
+- Be careful editing claude_client.py (this file) — a syntax error will prevent startup.
+"""
+
+        text = f"""You are Claude, a personal AI assistant running on a Linux VPS via Telegram.
+You have access to tools for running bash commands, editing files, searching the web, and fetching web pages.
+
+## Persistent Memory
+{memory_text}
+
+To save new memories, use the text editor tool to edit the memory.json file in your workspace.
+The memory file is at: {workspace}/memory.json
+
+## Environment
+- Workspace: {workspace}
+- Host: {socket.gethostname()}
+- Platform: {platform.system()} {platform.release()}
+- Date: {datetime.now().strftime("%Y-%m-%d %H:%M %Z")}
+- Python: {platform.python_version()}
+
+## Workspace Contents
+{workspace_listing}
+{source_section}
+## Guidelines
+- Be concise in responses — this is a Telegram chat, not a document.
+- Use markdown formatting (the bot converts it to Telegram HTML).
+- When running commands, prefer the workspace directory.
+- For multi-step tasks, explain what you're doing briefly before each tool use.
+- If a command might be destructive, confirm with the user first.
+- Remember important facts and preferences by updating memory.json.
+
+## Tool Notes
+- bash: Persistent shell session in the workspace directory.
+- str_replace_based_edit_tool: View, create, and edit files in the workspace{' and your own source code' if source_dir else ''}.
+- web_search: Search the web (max 5 uses per turn).
+- web_fetch: Fetch and read web pages (max 5 uses per turn).
+"""
+        # Pad to ensure >2048 tokens for cache eligibility
+        current_estimate = len(text) // 4
+        if current_estimate < 2200:
+            padding_needed = 2200 - current_estimate
+            text += "\n" + " " * (padding_needed * 4)
+
+        return [
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+    async def run_conversation_turn(
+        self,
+        messages: list[dict],
+        model: str,
+        user_id: int,
+        conversation_id: str | None,
+        on_text_chunk: Callable[[str], Any] | None = None,
+        on_tool_status: Callable[[str, str], Any] | None = None,
+    ) -> tuple[list[dict], str]:
+        """Run a full conversation turn with streaming and tool loop.
+
+        Returns (assistant_content_blocks, stop_reason).
+        """
+        system = self._build_system_prompt()
+        bash = self._get_bash_session(user_id)
+        editor = self._get_text_editor(user_id)
+        max_tool_rounds = 20
+
+        all_content_blocks: list[dict] = []
+
+        for round_num in range(max_tool_rounds):
+            text_buffer = ""
+            content_blocks: list[dict] = []
+            current_tool_input = ""
+            current_tool_name = ""
+
+            try:
+                async with self.client.messages.stream(
+                    model=model,
+                    max_tokens=8192,
+                    system=system,
+                    tools=self.tools,
+                    messages=messages,
+                ) as stream:
+                    async for event in stream:
+                        if event.type == "content_block_start":
+                            if event.content_block.type == "text":
+                                text_buffer = ""
+                            elif event.content_block.type == "tool_use":
+                                current_tool_name = event.content_block.name
+                                current_tool_input = ""
+
+                        elif event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                text_buffer += event.delta.text
+                                if on_text_chunk:
+                                    await on_text_chunk(event.delta.text)
+                            elif event.delta.type == "input_json_delta":
+                                current_tool_input += event.delta.partial_json
+
+                        elif event.type == "content_block_stop":
+                            pass
+
+                    # Get the final message for full content and usage
+                    response = await stream.get_final_message()
+
+            except anthropic.APIError as e:
+                logger.error(f"Anthropic API error: {e}")
+                return [{"type": "text", "text": f"API error: {e.message}"}], "error"
+
+            # Log usage
+            if response.usage:
+                usage_dict = {
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                    "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+                    "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
+                }
+                await log_usage(self.db, user_id, conversation_id, model, usage_dict)
+
+            # Extract content blocks
+            content_blocks = []
+            for block in response.content:
+                if block.type == "text":
+                    content_blocks.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+                elif block.type == "server_tool_use":
+                    content_blocks.append({
+                        "type": "server_tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+                elif hasattr(block, "type"):
+                    # Server tool results and other blocks - pass through
+                    content_blocks.append(block.model_dump() if hasattr(block, "model_dump") else {"type": block.type})
+
+            all_content_blocks = content_blocks
+            stop_reason = response.stop_reason
+
+            # If no tool use, we're done
+            if stop_reason == "end_turn":
+                return all_content_blocks, stop_reason
+
+            # Handle pause_turn (server-side tool loops)
+            if stop_reason == "pause_turn":
+                # Append response and continue
+                messages.append({"role": "assistant", "content": response.content})
+                continue
+
+            # Handle tool_use - execute client-side tools
+            if stop_reason == "tool_use":
+                tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+
+                if not tool_use_blocks:
+                    return all_content_blocks, stop_reason
+
+                # Append assistant message with full content
+                messages.append({"role": "assistant", "content": response.content})
+
+                # Execute tools and collect results
+                tool_results = []
+                for tool_block in tool_use_blocks:
+                    if tool_block.name in SERVER_TOOLS:
+                        continue
+
+                    # Show tool status
+                    tool_desc = ""
+                    if tool_block.name == "bash":
+                        tool_desc = tool_block.input.get("command", "")[:100]
+                    elif tool_block.name == "str_replace_based_edit_tool":
+                        cmd = tool_block.input.get("command", "")
+                        path = tool_block.input.get("path", "")
+                        tool_desc = f"{cmd}: {path}"
+
+                    if on_tool_status and tool_desc:
+                        await on_tool_status(tool_block.name, tool_desc)
+
+                    result = await execute_tool(
+                        tool_block.name,
+                        tool_block.input,
+                        bash,
+                        editor,
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_block.id,
+                        "content": result,
+                    })
+
+                if tool_results:
+                    messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # Unknown stop reason
+            return all_content_blocks, stop_reason
+
+        # Exceeded max rounds
+        all_content_blocks.append({
+            "type": "text",
+            "text": "\n\n[Reached maximum tool execution rounds]",
+        })
+        return all_content_blocks, "max_rounds"
+
+    async def close(self):
+        """Clean up resources."""
+        for session in self._bash_sessions.values():
+            await session.close()
+        self._bash_sessions.clear()
+        await self.client.close()

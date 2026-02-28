@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebSearch",
+      "WebFetch(domain:docs.python-telegram-bot.org)",
+      "Skill(claude-developer-platform)",
+      "Bash(chmod +x:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}
