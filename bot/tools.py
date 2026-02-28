@@ -13,7 +13,60 @@ def get_tool_definitions() -> list[dict]:
         {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
         {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5},
+        {
+            "name": "send_file",
+            "description": (
+                "Send a file from the workspace to the user via Telegram. "
+                "Use this after creating or downloading a file the user needs."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or workspace-relative path to the file",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption for the file",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
     ]
+
+
+def resolve_file_path(
+    file_path: str, workspace: Path, allowed_roots: list[Path] | None = None
+) -> Path:
+    """Resolve a file path, ensuring it falls within allowed directories.
+
+    Args:
+        file_path: Absolute or workspace-relative path string.
+        workspace: The workspace directory (used as default root and for relative paths).
+        allowed_roots: Additional allowed root directories. Workspace is always allowed.
+
+    Returns:
+        Resolved absolute Path.
+
+    Raises:
+        ValueError: If the resolved path is outside all allowed directories.
+    """
+    resolved = Path(file_path)
+    if not resolved.is_absolute():
+        resolved = workspace / resolved
+    resolved = resolved.resolve()
+
+    roots = [workspace.resolve()]
+    if allowed_roots:
+        roots.extend(r.resolve() for r in allowed_roots)
+
+    for root in roots:
+        if str(resolved).startswith(str(root)):
+            return resolved
+
+    raise ValueError(f"Path {file_path} is outside allowed directories")
 
 
 # Commands that are too dangerous to run
@@ -159,19 +212,7 @@ class TextEditorHandler:
 
     def _resolve_path(self, file_path: str) -> Path:
         """Resolve a path, allowing workspace and any extra allowed roots."""
-        resolved = Path(file_path)
-        if not resolved.is_absolute():
-            resolved = self.workspace / resolved
-        resolved = resolved.resolve()
-
-        # Security: ensure path is within an allowed root
-        for root in self._allowed_roots:
-            if str(resolved).startswith(str(root)):
-                return resolved
-
-        raise ValueError(f"Path {file_path} is outside allowed directories")
-
-        return resolved
+        return resolve_file_path(file_path, self.workspace, self._allowed_roots)
 
     def handle(self, tool_input: dict) -> str:
         """Handle a text editor command."""

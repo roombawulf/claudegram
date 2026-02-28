@@ -17,8 +17,7 @@ class Config:
     bot_source_dir: Path | None = None
     db_path: str = "data/bot.db"
 
-    sonnet_model: str = "claude-sonnet-4-6"
-    haiku_model: str = "claude-haiku-4-5-20251001"
+    model: str = "claude-sonnet-4-6"
 
     stream_edit_interval_ms: int = 1500
     stream_min_chars: int = 50
@@ -54,8 +53,7 @@ class Config:
             workspace_dir=workspace_dir,
             bot_source_dir=bot_source_dir,
             db_path=os.environ.get("DB_PATH", "data/bot.db"),
-            sonnet_model=os.environ.get("SONNET_MODEL", "claude-sonnet-4-6"),
-            haiku_model=os.environ.get("HAIKU_MODEL", "claude-haiku-4-5-20251001"),
+            model=os.environ.get("MODEL", "claude-sonnet-4-6"),
             stream_edit_interval_ms=int(os.environ.get("STREAM_EDIT_INTERVAL_MS", "1500")),
             stream_min_chars=int(os.environ.get("STREAM_MIN_CHARS", "50")),
             daily_cost_alert_usd=float(os.environ.get("DAILY_COST_ALERT_USD", "5.0")),

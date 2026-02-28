@@ -10,7 +10,6 @@ from .database import init_database
 from .memory import Memory
 from .telegram_handler import (
     cmd_memory,
-    cmd_model,
     cmd_new,
     cmd_restart,
     cmd_start,
@@ -81,7 +80,6 @@ def main() -> None:
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
-    app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("status", cmd_status))

@@ -5,19 +5,31 @@ import platform
 import socket
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import anthropic
 
 from .config import Config
 from .cost_tracker import log_usage
 from .memory import Memory
-from .tools import BashSession, TextEditorHandler, execute_tool, get_tool_definitions
+from .tools import BashSession, TextEditorHandler, execute_tool, get_tool_definitions, resolve_file_path
 
 logger = logging.getLogger(__name__)
 
 # Server-side tools - we don't execute these, Anthropic does
 SERVER_TOOLS = {"web_search", "web_fetch"}
+
+
+def _strip_keys(obj, keys: set):
+    """Recursively remove keys from a nested dict/list structure."""
+    if isinstance(obj, dict):
+        for k in keys & obj.keys():
+            del obj[k]
+        for v in obj.values():
+            _strip_keys(v, keys)
+    elif isinstance(obj, list):
+        for item in obj:
+            _strip_keys(item, keys)
 
 
 class ClaudeClient:
@@ -133,6 +145,7 @@ The memory file is at: {workspace}/memory.json
 - str_replace_based_edit_tool: View, create, and edit files in the workspace{' and your own source code' if source_dir else ''}.
 - web_search: Search the web (max 5 uses per turn).
 - web_fetch: Fetch and read web pages (max 5 uses per turn).
+- send_file: Send a file from the workspace to the user via Telegram. Use after creating/downloading a file. Images (jpg, png, gif, webp) are sent as photos; everything else as a document.
 """
         # Pad to ensure >2048 tokens for cache eligibility
         current_estimate = len(text) // 4
@@ -156,6 +169,7 @@ The memory file is at: {workspace}/memory.json
         conversation_id: str | None,
         on_text_chunk: Callable[[str], Any] | None = None,
         on_tool_status: Callable[[str, str], Any] | None = None,
+        on_file_send: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> tuple[list[dict], str]:
         """Run a full conversation turn with streaming and tool loop.
 
@@ -218,7 +232,8 @@ The memory file is at: {workspace}/memory.json
                 }
                 await log_usage(self.db, user_id, conversation_id, model, usage_dict)
 
-            # Extract content blocks
+            # Extract content blocks, sanitizing server-side tool results
+            # so they can be safely replayed in subsequent API calls
             content_blocks = []
             for block in response.content:
                 if block.type == "text":
@@ -238,8 +253,12 @@ The memory file is at: {workspace}/memory.json
                         "input": block.input,
                     })
                 elif hasattr(block, "type"):
-                    # Server tool results and other blocks - pass through
-                    content_blocks.append(block.model_dump() if hasattr(block, "model_dump") else {"type": block.type})
+                    if hasattr(block, "model_dump"):
+                        dumped = block.model_dump()
+                        _strip_keys(dumped, {"citations"})
+                        content_blocks.append(dumped)
+                    else:
+                        content_blocks.append({"type": block.type})
 
             all_content_blocks = content_blocks
             stop_reason = response.stop_reason
@@ -250,8 +269,8 @@ The memory file is at: {workspace}/memory.json
 
             # Handle pause_turn (server-side tool loops)
             if stop_reason == "pause_turn":
-                # Append response and continue
-                messages.append({"role": "assistant", "content": response.content})
+                # Append sanitized content blocks and continue
+                messages.append({"role": "assistant", "content": content_blocks})
                 continue
 
             # Handle tool_use - execute client-side tools
@@ -261,8 +280,8 @@ The memory file is at: {workspace}/memory.json
                 if not tool_use_blocks:
                     return all_content_blocks, stop_reason
 
-                # Append assistant message with full content
-                messages.append({"role": "assistant", "content": response.content})
+                # Append sanitized assistant message
+                messages.append({"role": "assistant", "content": content_blocks})
 
                 # Execute tools and collect results
                 tool_results = []
@@ -278,16 +297,24 @@ The memory file is at: {workspace}/memory.json
                         cmd = tool_block.input.get("command", "")
                         path = tool_block.input.get("path", "")
                         tool_desc = f"{cmd}: {path}"
+                    elif tool_block.name == "send_file":
+                        tool_desc = tool_block.input.get("path", "")
 
                     if on_tool_status and tool_desc:
                         await on_tool_status(tool_block.name, tool_desc)
 
-                    result = await execute_tool(
-                        tool_block.name,
-                        tool_block.input,
-                        bash,
-                        editor,
-                    )
+                    # Handle send_file separately
+                    if tool_block.name == "send_file":
+                        result = await self._handle_send_file(
+                            tool_block.input, user_id, on_file_send
+                        )
+                    else:
+                        result = await execute_tool(
+                            tool_block.name,
+                            tool_block.input,
+                            bash,
+                            editor,
+                        )
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_block.id,
@@ -307,6 +334,48 @@ The memory file is at: {workspace}/memory.json
             "text": "\n\n[Reached maximum tool execution rounds]",
         })
         return all_content_blocks, "max_rounds"
+
+    async def _handle_send_file(
+        self,
+        tool_input: dict,
+        user_id: int,
+        on_file_send: Callable[[str, str], Awaitable[str]] | None,
+    ) -> str:
+        """Resolve, validate, and send a file via the on_file_send callback."""
+        file_path = tool_input.get("path", "")
+        caption = tool_input.get("caption", "")
+
+        if not file_path:
+            return "Error: 'path' is required."
+
+        # Resolve and sandbox the path
+        try:
+            allowed = []
+            if self.config.bot_source_dir:
+                allowed.append(self.config.bot_source_dir)
+            resolved = resolve_file_path(file_path, self.config.workspace_dir, allowed)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        if not resolved.exists():
+            return f"Error: File not found: {resolved}"
+
+        if not resolved.is_file():
+            return f"Error: Not a file: {resolved}"
+
+        # 50 MB limit
+        size = resolved.stat().st_size
+        if size > 50 * 1024 * 1024:
+            return f"Error: File too large ({size / 1024 / 1024:.1f} MB). Telegram limit is 50 MB."
+
+        if on_file_send is None:
+            return "Error: File sending is not available in this context."
+
+        try:
+            return await on_file_send(str(resolved), caption)
+        except Exception as e:
+            logger.error(f"send_file failed: {e}")
+            return f"Error sending file: {e}"
 
     async def close(self):
         """Clean up resources."""

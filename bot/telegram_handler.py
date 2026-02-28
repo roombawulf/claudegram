@@ -13,7 +13,6 @@ from .claude_client import ClaudeClient
 from .config import Config
 from .conversation import ConversationManager
 from .cost_tracker import format_usage_report, get_daily_cost
-from .model_router import classify_message
 from .streaming import StreamingResponseManager
 
 logger = logging.getLogger(__name__)
@@ -29,24 +28,37 @@ def _get_conversation_manager(context: ContextTypes.DEFAULT_TYPE, user_id: int) 
     if user_id not in managers:
         db = context.bot_data["db"]
         config: Config = context.bot_data["config"]
-        managers[user_id] = ConversationManager(db, user_id, config.haiku_model)
+        managers[user_id] = ConversationManager(db, user_id, config.model)
     return managers[user_id]
 
 
-def _get_model(context: ContextTypes.DEFAULT_TYPE, user_id: int, tier: str) -> str:
-    """Resolve model tier to model ID, respecting overrides."""
-    config: Config = context.bot_data["config"]
-    overrides: dict = context.bot_data.setdefault("model_overrides", {})
 
-    override = overrides.get(user_id)
-    if override == "haiku":
-        return config.haiku_model
-    elif override == "sonnet":
-        return config.sonnet_model
-    elif override:
-        return override  # custom model string
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
-    return config.haiku_model if tier == "haiku" else config.sonnet_model
+
+def _make_file_sender(chat):
+    """Create an on_file_send callback bound to a Telegram chat."""
+
+    async def send_file_to_user(path: str, caption: str) -> str:
+        file_path = Path(path)
+        if not file_path.exists():
+            return f"Error: File not found: {path}"
+        if not file_path.is_file():
+            return f"Error: Not a file: {path}"
+        size = file_path.stat().st_size
+        if size > 50 * 1024 * 1024:
+            return f"Error: File too large ({size / 1024 / 1024:.1f} MB). Telegram limit is 50 MB."
+
+        try:
+            if file_path.suffix.lower() in IMAGE_EXTENSIONS:
+                await chat.send_photo(photo=open(file_path, "rb"), caption=caption or None)
+            else:
+                await chat.send_document(document=open(file_path, "rb"), caption=caption or None)
+            return "File sent successfully."
+        except Exception as e:
+            return f"Error sending file: {e}"
+
+    return send_file_to_user
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -61,7 +73,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "I'm Claude, running with direct API access for fast, cost-efficient responses.\n\n"
         "<b>Commands:</b>\n"
         "/new - Start a new conversation\n"
-        "/model [haiku|sonnet|auto] - Set model\n"
         "/usage - View cost & usage stats\n"
         "/memory - View stored memories\n"
         "/status - Current session info\n"
@@ -82,35 +93,6 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await manager.reset()
     await update.message.reply_text("New conversation started.")
 
-
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /model - set model override."""
-    config: Config = context.bot_data["config"]
-    if not _is_authorized(update.effective_user.id, config):
-        await update.message.reply_text("Unauthorized.")
-        return
-
-    overrides: dict = context.bot_data.setdefault("model_overrides", {})
-    args = context.args
-
-    if not args:
-        current = overrides.get(update.effective_user.id, "auto")
-        await update.message.reply_text(
-            f"Current model: <b>{current}</b>\n\n"
-            f"Usage: /model [haiku|sonnet|auto]",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    choice = args[0].lower()
-    if choice == "auto":
-        overrides.pop(update.effective_user.id, None)
-        await update.message.reply_text("Model set to <b>auto</b> (router decides).", parse_mode=ParseMode.HTML)
-    elif choice in ("haiku", "sonnet"):
-        overrides[update.effective_user.id] = choice
-        await update.message.reply_text(f"Model locked to <b>{choice}</b>.", parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text("Unknown model. Use: haiku, sonnet, or auto.")
 
 
 async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -150,9 +132,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg_count = len(manager.get_messages_for_api())
     est_tokens = manager.estimate_tokens()
 
-    overrides: dict = context.bot_data.setdefault("model_overrides", {})
-    model_setting = overrides.get(update.effective_user.id, "auto")
-
     db = context.bot_data["db"]
     daily = await get_daily_cost(db, update.effective_user.id)
 
@@ -161,7 +140,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Conversation: <code>{conv_id[:8]}...</code>\n"
         f"Messages: {msg_count}\n"
         f"Est. tokens: ~{est_tokens:,}\n"
-        f"Model: {model_setting}\n"
+        f"Model: {config.model}\n"
         f"Today's cost: ${daily.get('total_cost', 0):.4f}",
         parse_mode=ParseMode.HTML,
     )
@@ -209,9 +188,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not text.strip():
         return
 
-    # Classify and select model
-    tier = classify_message(text)
-    model = _get_model(context, user_id, tier)
+    model = config.model
 
     # Get conversation manager
     manager = _get_conversation_manager(context, user_id)
@@ -242,6 +219,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         conversation_id=conv_id,
         on_text_chunk=streamer.on_chunk,
         on_tool_status=streamer.on_tool_status,
+        on_file_send=_make_file_sender(update.message.chat),
     )
 
     # Extract final text
@@ -297,8 +275,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         {"type": "text", "text": caption},
     ]
 
-    # Always use Sonnet for images
-    model = _get_model(context, user_id, "sonnet")
+    model = config.model
 
     manager = _get_conversation_manager(context, user_id)
     claude: ClaudeClient = context.bot_data["claude"]
@@ -319,6 +296,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         conversation_id=conv_id,
         on_text_chunk=streamer.on_chunk,
         on_tool_status=streamer.on_tool_status,
+        on_file_send=_make_file_sender(update.message.chat),
     )
 
     final_text = ""
@@ -357,7 +335,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     caption = update.message.caption or f"I've uploaded a file: {doc.file_name}"
     text = f"{caption}\n\nFile saved to: {save_path}\n\nContent preview:\n```\n{file_content[:3000]}\n```"
 
-    model = _get_model(context, user_id, "sonnet")
+    model = config.model
 
     manager = _get_conversation_manager(context, user_id)
     claude: ClaudeClient = context.bot_data["claude"]
@@ -378,6 +356,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         conversation_id=conv_id,
         on_text_chunk=streamer.on_chunk,
         on_tool_status=streamer.on_tool_status,
+        on_file_send=_make_file_sender(update.message.chat),
     )
 
     final_text = ""

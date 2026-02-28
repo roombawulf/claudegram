@@ -118,9 +118,8 @@ WORKSPACE_DIR=$WORKSPACE_DIR
 DB_PATH=$INSTALL_DIR/data/bot.db
 BOT_SOURCE_DIR=$INSTALL_DIR
 
-# Models
-SONNET_MODEL=claude-sonnet-4-6
-HAIKU_MODEL=claude-haiku-4-5-20251001
+# Model
+MODEL=claude-sonnet-4-6
 
 # Streaming
 STREAM_EDIT_INTERVAL_MS=1500

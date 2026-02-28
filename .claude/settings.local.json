@@ -15,7 +15,8 @@
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:iconbuddy.com)",
       "WebFetch(domain:files.svgcdn.io)",
-      "Bash(open:*)"
+      "Bash(open:*)",
+      "Bash(python:*)"
     ]
   }
 }

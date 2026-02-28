@@ -20,10 +20,10 @@ SUMMARIZE_OLDEST_RATIO = 0.6
 class ConversationManager:
     """Manage conversation state for a single user."""
 
-    def __init__(self, db: aiosqlite.Connection, user_id: int, haiku_model: str):
+    def __init__(self, db: aiosqlite.Connection, user_id: int, summary_model: str):
         self.db = db
         self.user_id = user_id
-        self.haiku_model = haiku_model
+        self.summary_model = summary_model
         self._conversation_id: str | None = None
         self._messages_cache: list[dict] = []
 
@@ -102,7 +102,7 @@ class ConversationManager:
 
         try:
             response = await client.messages.create(
-                model=self.haiku_model,
+                model=self.summary_model,
                 max_tokens=2048,
                 messages=summary_messages,
             )
