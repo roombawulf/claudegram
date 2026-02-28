@@ -50,13 +50,13 @@ echo "  2. Anthropic API Key   — from console.anthropic.com"
 echo "  3. Your Telegram User ID — from @userinfobot"
 echo ""
 
-read -rp "Telegram Bot Token: " TELEGRAM_TOKEN
+read -rp "Telegram Bot Token: " TELEGRAM_TOKEN < /dev/tty
 [ -z "$TELEGRAM_TOKEN" ] && fail "Token cannot be empty"
 
-read -rp "Anthropic API Key: " ANTHROPIC_KEY
+read -rp "Anthropic API Key: " ANTHROPIC_KEY < /dev/tty
 [ -z "$ANTHROPIC_KEY" ] && fail "API key cannot be empty"
 
-read -rp "Your Telegram User ID (comma-separated for multiple): " USER_IDS
+read -rp "Your Telegram User ID (comma-separated for multiple): " USER_IDS < /dev/tty
 [ -z "$USER_IDS" ] && fail "User ID cannot be empty"
 
 # ─── Create service user ───
@@ -159,7 +159,7 @@ ok "Service enabled"
 
 # ─── Start ───
 echo ""
-read -rp "Start the bot now? [Y/n] " START_NOW
+read -rp "Start the bot now? [Y/n] " START_NOW < /dev/tty
 START_NOW=${START_NOW:-Y}
 
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
