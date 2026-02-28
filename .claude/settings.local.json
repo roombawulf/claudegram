@@ -9,7 +9,13 @@
       "Skill(claude-developer-platform)",
       "Bash(chmod +x:*)",
       "Bash(python3:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "WebFetch(domain:www.svgrepo.com)",
+      "WebFetch(domain:freesvg.org)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:iconbuddy.com)",
+      "WebFetch(domain:files.svgcdn.io)",
+      "Bash(open:*)"
     ]
   }
 }

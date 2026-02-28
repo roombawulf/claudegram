@@ -1,6 +1,5 @@
 <p align="center">
-  <h1 align="center">claudegram</h1>
-  <p align="center">A self-hosted Telegram bot that puts Claude on your VPS — with shell access, file editing, web browsing, persistent memory, and the ability to modify its own source code.</p>
+  <img src="logo.svg" alt="claudegram" width="480">
 </p>
 
 <p align="center">
