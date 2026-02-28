@@ -8,7 +8,8 @@
       "WebFetch(domain:docs.python-telegram-bot.org)",
       "Skill(claude-developer-platform)",
       "Bash(chmod +x:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(bash:*)"
     ]
   }
 }
