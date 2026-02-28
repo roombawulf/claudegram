@@ -16,7 +16,8 @@
       "WebFetch(domain:iconbuddy.com)",
       "WebFetch(domain:files.svgcdn.io)",
       "Bash(open:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(pip show:*)"
     ]
   }
 }

@@ -20,16 +20,7 @@ logger = logging.getLogger(__name__)
 SERVER_TOOLS = {"web_search", "web_fetch"}
 
 
-def _strip_keys(obj, keys: set):
-    """Recursively remove keys from a nested dict/list structure."""
-    if isinstance(obj, dict):
-        for k in keys & obj.keys():
-            del obj[k]
-        for v in obj.values():
-            _strip_keys(v, keys)
-    elif isinstance(obj, list):
-        for item in obj:
-            _strip_keys(item, keys)
+ALLOWED_SERVER_RESULT_KEYS = {"type", "tool_use_id", "content", "cache_control"}
 
 
 class ClaudeClient:
@@ -255,8 +246,8 @@ The memory file is at: {workspace}/memory.json
                 elif hasattr(block, "type"):
                     if hasattr(block, "model_dump"):
                         dumped = block.model_dump()
-                        _strip_keys(dumped, {"citations"})
-                        content_blocks.append(dumped)
+                        sanitized = {k: v for k, v in dumped.items() if k in ALLOWED_SERVER_RESULT_KEYS}
+                        content_blocks.append(sanitized)
                     else:
                         content_blocks.append({"type": block.type})
 
