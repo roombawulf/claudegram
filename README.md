@@ -77,9 +77,9 @@ python -m bot.main
 <summary><b>Updating</b></summary>
 
 ```bash
-cd /opt/claude-telegram
+cd /opt/claudegram
 sudo -u claude-bot git pull
-sudo systemctl restart claude-telegram
+sudo systemctl restart claudegram
 ```
 
 Or re-run the installer — it detects the existing clone and pulls the latest.
@@ -173,7 +173,7 @@ claudegram/
 │   └── memory.py              Persistent memory system
 ├── .env.example
 ├── requirements.txt
-├── claude-telegram.service    systemd unit
+├── claudegram.service         systemd unit
 └── install.sh                 VPS installer
 ```
 
@@ -211,7 +211,7 @@ Claude can:
 - Commit and push changes via bash
 - Restart itself with `/restart`
 
-The installer configures this automatically — `BOT_SOURCE_DIR` is set to `/opt/claude-telegram` and the service user gets passwordless `sudo systemctl restart claude-telegram`.
+The installer configures this automatically — `BOT_SOURCE_DIR` is set to `/opt/claudegram` and the service user gets passwordless `sudo systemctl restart claudegram`.
 
 For git push to work, configure credentials for the `claude-bot` user (SSH key or GitHub token).
 

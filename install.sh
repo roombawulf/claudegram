@@ -3,10 +3,10 @@ set -euo pipefail
 
 DEFAULT_REPO="https://github.com/roombawulf/claudegram.git"
 REPO_URL="${1:-$DEFAULT_REPO}"
-INSTALL_DIR="/opt/claude-telegram"
+INSTALL_DIR="/opt/claudegram"
 SERVICE_USER="claude-bot"
 WORKSPACE_DIR="/home/${SERVICE_USER}/claude-workspace"
-SERVICE_NAME="claude-telegram"
+SERVICE_NAME="claudegram"
 
 # ─── Colors ───
 RED='\033[0;31m'
@@ -23,7 +23,7 @@ fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 # ─── Preflight ───
 echo ""
 echo -e "${CYAN}══════════════════════════════════════${NC}"
-echo -e "${CYAN}   Claude Telegram Bot — Installer    ${NC}"
+echo -e "${CYAN}       Claudegram — Installer           ${NC}"
 echo -e "${CYAN}══════════════════════════════════════${NC}"
 echo ""
 
@@ -134,7 +134,7 @@ chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/.env"
 ok ".env written (permissions: 600)"
 
 # ─── Sudoers for restart ───
-SUDOERS_FILE="/etc/sudoers.d/claude-telegram"
+SUDOERS_FILE="/etc/sudoers.d/claudegram"
 if [ ! -f "$SUDOERS_FILE" ]; then
     info "Granting $SERVICE_USER passwordless restart permission..."
     echo "$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart $SERVICE_NAME" > "$SUDOERS_FILE"
@@ -152,7 +152,7 @@ ok "Git identity set"
 
 # ─── Systemd service ───
 info "Installing systemd service..."
-cp "$INSTALL_DIR/claude-telegram.service" /etc/systemd/system/
+cp "$INSTALL_DIR/claudegram.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" --quiet
 ok "Service enabled"

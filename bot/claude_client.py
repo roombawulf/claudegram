@@ -89,12 +89,12 @@ Key files:
   bot/database.py          — SQLite schema and helpers
   requirements.txt         — Python dependencies
   install.sh               — VPS deployment script
-  claude-telegram.service  — systemd unit file
+  claudegram.service       — systemd unit file
 
 ### Self-Modification Guidelines
 - You can edit any of these files to fix bugs, add features, or improve yourself.
 - After editing, commit and push with: `cd {source_dir} && git add -A && git commit -m "description" && git push`
-- To apply changes, restart yourself: `sudo systemctl restart claude-telegram`
+- To apply changes, restart yourself: `sudo systemctl restart claudegram`
   (Note: this will end the current response. Tell the user you're restarting first.)
 - Always explain what you're changing and why before making edits.
 - Test changes mentally before applying — there's no staging environment.

@@ -181,7 +181,7 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # This will kill our own process; systemd will restart it
     proc = await asyncio.create_subprocess_exec(
-        "sudo", "systemctl", "restart", "claude-telegram",
+        "sudo", "systemctl", "restart", "claudegram",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

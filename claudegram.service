@@ -1,14 +1,14 @@
 [Unit]
-Description=Claude Telegram Bot
+Description=Claudegram Bot
 After=network.target
 
 [Service]
 Type=simple
 User=claude-bot
 Group=claude-bot
-WorkingDirectory=/opt/claude-telegram
-EnvironmentFile=/opt/claude-telegram/.env
-ExecStart=/opt/claude-telegram/venv/bin/python -m bot.main
+WorkingDirectory=/opt/claudegram
+EnvironmentFile=/opt/claudegram/.env
+ExecStart=/opt/claudegram/venv/bin/python -m bot.main
 Restart=always
 RestartSec=10
 StandardOutput=journal
