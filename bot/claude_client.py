@@ -22,6 +22,38 @@ SERVER_TOOLS = {"web_search", "web_fetch"}
 
 ALLOWED_SERVER_RESULT_KEYS = {"type", "tool_use_id", "content", "cache_control"}
 
+CACHE_BREAKPOINT = {"type": "ephemeral"}
+
+
+def _inject_cache_breakpoints(messages: list[dict]) -> None:
+    """Ensure exactly one cache breakpoint on the last message in the history.
+
+    Strips any existing breakpoints from messages first, then adds one to the
+    last content block. Combined with the system prompt breakpoint, this gives
+    2 total (well under the API limit of 4).
+    """
+    if not messages:
+        return
+
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+    last_msg = messages[-1]
+    content = last_msg.get("content")
+
+    if isinstance(content, list) and content:
+        last_block = content[-1]
+        if isinstance(last_block, dict):
+            last_block["cache_control"] = CACHE_BREAKPOINT
+    elif isinstance(content, str):
+        last_msg["content"] = [
+            {"type": "text", "text": content, "cache_control": CACHE_BREAKPOINT}
+        ]
+
 
 class ClaudeClient:
     """Wraps the Anthropic async client with caching, streaming, and tool loop."""
@@ -180,6 +212,7 @@ The memory file is at: {workspace}/memory.json
             current_tool_name = ""
 
             try:
+                _inject_cache_breakpoints(messages)
                 async with self.client.messages.stream(
                     model=model,
                     max_tokens=8192,
