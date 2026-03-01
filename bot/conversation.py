@@ -16,7 +16,7 @@ TOKEN_ESTIMATE_DIVISOR = 4  # rough: 1 token ≈ 4 chars
 SUMMARIZE_THRESHOLD = 120_000  # tokens
 SUMMARIZE_OLDEST_RATIO = 0.6
 
-TOOL_USE_TYPES = {"tool_use", "server_tool_use"}
+TOOL_USE_TYPES = {"tool_use"}
 
 
 def _sanitize_messages(messages: list[dict]) -> list[dict]:
