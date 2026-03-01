@@ -205,7 +205,7 @@ The memory file is at: {workspace}/memory.json
         system = self._build_system_prompt()
         bash = self._get_bash_session(user_id)
         editor = self._get_text_editor(user_id)
-        max_tool_rounds = 20
+        max_tool_rounds = 200  # safety net; cancel_event is the real limit
 
         all_content_blocks: list[dict] = []
         text_buffer = ""
@@ -385,17 +385,12 @@ The memory file is at: {workspace}/memory.json
             # Unknown stop reason
             return all_content_blocks, stop_reason
 
-        # Exceeded max rounds — strip tool_use blocks since we won't
-        # provide results for them (prevents orphaned tool_use in history)
+        # Exceeded safety limit — strip tool_use blocks to prevent orphans
         all_content_blocks = [
             b for b in all_content_blocks
             if not (isinstance(b, dict) and b.get("type") in ("tool_use", "server_tool_use"))
         ]
-        all_content_blocks.append({
-            "type": "text",
-            "text": "\n\n[Reached maximum tool execution rounds]",
-        })
-        return all_content_blocks, "max_rounds"
+        return all_content_blocks, "end_turn"
 
     async def _handle_send_file(
         self,

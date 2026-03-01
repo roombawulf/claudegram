@@ -40,7 +40,6 @@ class StreamingResponseManager:
         self.reply_markup = None  # optional InlineKeyboardMarkup
 
         # Chat-action pulse
-        self._phase: str = "typing"  # "typing" | "tool"
         self._pulse_task: asyncio.Task | None = None
         self._start_pulse()
 
@@ -55,13 +54,8 @@ class StreamingResponseManager:
         """Send a chat action every 4 s until cancelled."""
         try:
             while True:
-                action = (
-                    ChatAction.UPLOAD_DOCUMENT
-                    if self._phase == "tool"
-                    else ChatAction.TYPING
-                )
                 try:
-                    await self.chat.send_action(action)
+                    await self.chat.send_action(ChatAction.TYPING)
                 except Exception:
                     pass  # best-effort
                 await asyncio.sleep(4)
@@ -102,7 +96,6 @@ class StreamingResponseManager:
         if self._finalized:
             return
 
-        self._phase = "typing"
         self.buffer += text_delta
 
         now = time.monotonic()
@@ -116,8 +109,6 @@ class StreamingResponseManager:
         """Show a tool execution status message."""
         if self._finalized:
             return
-
-        self._phase = "tool"
 
         desc_escaped = escape(description)
         status = f"\u2699\ufe0f Running <code>{escape(tool_name)}</code>: <code>{desc_escaped}</code>..."
