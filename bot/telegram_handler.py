@@ -5,8 +5,8 @@ import base64
 import logging
 from pathlib import Path
 
-from telegram import Update
-from telegram.constants import ChatAction, ParseMode
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from .claude_client import ClaudeClient
@@ -33,7 +33,8 @@ def _get_conversation_manager(context: ContextTypes.DEFAULT_TYPE, user_id: int) 
 
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+ANIMATION_EXTENSIONS = {".gif", ".webp"}
 
 
 def _make_file_sender(chat):
@@ -50,15 +51,91 @@ def _make_file_sender(chat):
             return f"Error: File too large ({size / 1024 / 1024:.1f} MB). Telegram limit is 50 MB."
 
         try:
-            if file_path.suffix.lower() in IMAGE_EXTENSIONS:
-                await chat.send_photo(photo=open(file_path, "rb"), caption=caption or None)
-            else:
-                await chat.send_document(document=open(file_path, "rb"), caption=caption or None)
+            suffix = file_path.suffix.lower()
+            with open(file_path, "rb") as f:
+                if suffix in ANIMATION_EXTENSIONS:
+                    await chat.send_animation(animation=f, caption=caption or None)
+                elif suffix in PHOTO_EXTENSIONS:
+                    await chat.send_photo(photo=f, caption=caption or None)
+                else:
+                    await chat.send_document(document=f, caption=caption or None)
             return "File sent successfully."
         except Exception as e:
             return f"Error sending file: {e}"
 
     return send_file_to_user
+
+
+def _make_widget_sender(chat, reply_to_message, streamer, bot):
+    """Create an on_widget_send callback for rich Telegram content."""
+
+    async def send_widget(params: dict) -> str:
+        widget_type = params.get("type", "")
+        emoji = params.get("emoji", "")
+
+        if widget_type == "reaction":
+            if not emoji:
+                return "Error: 'emoji' is required for reaction type."
+            try:
+                from telegram import ReactionTypeEmoji
+
+                await reply_to_message.set_reaction(
+                    [ReactionTypeEmoji(emoji=emoji)]
+                )
+                return f"Reacted with {emoji}"
+            except Exception as e:
+                return f"Error setting reaction: {e}"
+
+        elif widget_type == "sticker":
+            set_name = params.get("sticker_set_name", "")
+            if not set_name:
+                return "Error: 'sticker_set_name' is required for sticker type."
+            try:
+                sticker_set = await bot.get_sticker_set(set_name)
+                # Find a sticker matching the emoji, or use the first one
+                match = None
+                if emoji:
+                    for s in sticker_set.stickers:
+                        if s.emoji == emoji:
+                            match = s
+                            break
+                if match is None:
+                    match = sticker_set.stickers[0] if sticker_set.stickers else None
+                if match is None:
+                    return f"Error: Sticker set '{set_name}' is empty."
+                await chat.send_sticker(match.file_id)
+                return f"Sent sticker from {set_name}" + (f" (matched {match.emoji})" if match.emoji else "")
+            except Exception as e:
+                return f"Error sending sticker: {e}"
+
+        elif widget_type == "inline_buttons":
+            buttons = params.get("buttons", [])
+            if not buttons:
+                return "Error: 'buttons' array is required for inline_buttons type."
+            try:
+                keyboard = []
+                for row in buttons:
+                    keyboard.append([
+                        InlineKeyboardButton(text=btn["text"], url=btn["url"])
+                        for btn in row
+                    ])
+                streamer.set_reply_markup(InlineKeyboardMarkup(keyboard))
+                return "Buttons will be attached to your response."
+            except Exception as e:
+                return f"Error building inline buttons: {e}"
+
+        elif widget_type == "dice":
+            dice_emoji = emoji or "🎲"
+            try:
+                await chat.send_dice(emoji=dice_emoji)
+                return f"Sent dice {dice_emoji}"
+            except Exception as e:
+                return f"Error sending dice: {e}"
+
+        else:
+            return f"Error: Unknown widget type '{widget_type}'."
+
+    return send_widget
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -187,27 +264,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Maybe summarize if conversation is getting long
     await manager.maybe_summarize(claude.client)
 
-    # Send typing indicator and placeholder message
-    await update.message.chat.send_action(ChatAction.TYPING)
-    placeholder = await update.message.reply_text("\u2026")
-
-    # Set up streaming
-    streamer = StreamingResponseManager(placeholder, config)
+    # Set up streaming (message sent lazily when real content arrives)
+    streamer = StreamingResponseManager(
+        chat=update.message.chat,
+        reply_to_message=update.message,
+        config=config,
+    )
 
     # Build messages for API
     messages = manager.get_messages_for_api()
     conv_id = manager._conversation_id
 
-    # Run the conversation turn
-    content_blocks, stop_reason = await claude.run_conversation_turn(
-        messages=messages,
-        model=model,
-        user_id=user_id,
-        conversation_id=conv_id,
-        on_text_chunk=streamer.on_chunk,
-        on_tool_status=streamer.on_tool_status,
-        on_file_send=_make_file_sender(update.message.chat),
+    widget_sender = _make_widget_sender(
+        update.message.chat, update.message, streamer, context.bot,
     )
+
+    try:
+        # Run the conversation turn
+        content_blocks, stop_reason = await claude.run_conversation_turn(
+            messages=messages,
+            model=model,
+            user_id=user_id,
+            conversation_id=conv_id,
+            on_text_chunk=streamer.on_chunk,
+            on_tool_status=streamer.on_tool_status,
+            on_file_send=_make_file_sender(update.message.chat),
+            on_widget_send=widget_sender,
+        )
+    except Exception:
+        streamer.stop()
+        raise
 
     # Extract final text
     final_text = ""
@@ -269,22 +355,33 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await manager.add_user_message(content)
 
-    await update.message.chat.send_action(ChatAction.TYPING)
-    placeholder = await update.message.reply_text("\u2026")
-    streamer = StreamingResponseManager(placeholder, config)
+    streamer = StreamingResponseManager(
+        chat=update.message.chat,
+        reply_to_message=update.message,
+        config=config,
+    )
 
     messages = manager.get_messages_for_api()
     conv_id = manager._conversation_id
 
-    content_blocks, _ = await claude.run_conversation_turn(
-        messages=messages,
-        model=model,
-        user_id=user_id,
-        conversation_id=conv_id,
-        on_text_chunk=streamer.on_chunk,
-        on_tool_status=streamer.on_tool_status,
-        on_file_send=_make_file_sender(update.message.chat),
+    widget_sender = _make_widget_sender(
+        update.message.chat, update.message, streamer, context.bot,
     )
+
+    try:
+        content_blocks, _ = await claude.run_conversation_turn(
+            messages=messages,
+            model=model,
+            user_id=user_id,
+            conversation_id=conv_id,
+            on_text_chunk=streamer.on_chunk,
+            on_tool_status=streamer.on_tool_status,
+            on_file_send=_make_file_sender(update.message.chat),
+            on_widget_send=widget_sender,
+        )
+    except Exception:
+        streamer.stop()
+        raise
 
     final_text = ""
     for block in content_blocks:
@@ -329,22 +426,33 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await manager.add_user_message(text)
 
-    await update.message.chat.send_action(ChatAction.TYPING)
-    placeholder = await update.message.reply_text("\u2026")
-    streamer = StreamingResponseManager(placeholder, config)
+    streamer = StreamingResponseManager(
+        chat=update.message.chat,
+        reply_to_message=update.message,
+        config=config,
+    )
 
     messages = manager.get_messages_for_api()
     conv_id = manager._conversation_id
 
-    content_blocks, _ = await claude.run_conversation_turn(
-        messages=messages,
-        model=model,
-        user_id=user_id,
-        conversation_id=conv_id,
-        on_text_chunk=streamer.on_chunk,
-        on_tool_status=streamer.on_tool_status,
-        on_file_send=_make_file_sender(update.message.chat),
+    widget_sender = _make_widget_sender(
+        update.message.chat, update.message, streamer, context.bot,
     )
+
+    try:
+        content_blocks, _ = await claude.run_conversation_turn(
+            messages=messages,
+            model=model,
+            user_id=user_id,
+            conversation_id=conv_id,
+            on_text_chunk=streamer.on_chunk,
+            on_tool_status=streamer.on_tool_status,
+            on_file_send=_make_file_sender(update.message.chat),
+            on_widget_send=widget_sender,
+        )
+    except Exception:
+        streamer.stop()
+        raise
 
     final_text = ""
     for block in content_blocks:

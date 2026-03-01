@@ -34,6 +34,53 @@ def get_tool_definitions() -> list[dict]:
                 "required": ["path"],
             },
         },
+        {
+            "name": "send_telegram_widget",
+            "description": (
+                "Send rich Telegram content to enhance the conversation. "
+                "Types: 'reaction' (react to the user's message with an emoji), "
+                "'sticker' (send a sticker from a sticker set), "
+                "'inline_buttons' (attach URL buttons to your response message), "
+                "'dice' (send an animated dice/slot/bowling emoji)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["reaction", "sticker", "inline_buttons", "dice"],
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": (
+                            "For reaction: any single emoji. "
+                            "For sticker: emoji to match in the set. "
+                            "For dice: one of 🎲🎯🏀⚽🎳🎰"
+                        ),
+                    },
+                    "sticker_set_name": {
+                        "type": "string",
+                        "description": "For sticker: Telegram sticker set name",
+                    },
+                    "buttons": {
+                        "type": "array",
+                        "description": "For inline_buttons: rows of buttons",
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                    "url": {"type": "string"},
+                                },
+                                "required": ["text", "url"],
+                            },
+                        },
+                    },
+                },
+                "required": ["type"],
+            },
+        },
     ]
 
 

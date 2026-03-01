@@ -169,6 +169,7 @@ The memory file is at: {workspace}/memory.json
 - web_search: Search the web (max 5 uses per turn).
 - web_fetch: Fetch and read web pages (max 5 uses per turn).
 - send_file: Send a file from the workspace to the user via Telegram. Use after creating/downloading a file. Images (jpg, png, gif, webp) are sent as photos; everything else as a document.
+- send_telegram_widget: Send rich Telegram content — react to messages with emoji, send stickers from a set, attach inline URL buttons to your response, or send animated dice. Use naturally to add personality.
 """
         # Pad to ensure >2048 tokens for cache eligibility
         current_estimate = len(text) // 4
@@ -193,6 +194,7 @@ The memory file is at: {workspace}/memory.json
         on_text_chunk: Callable[[str], Any] | None = None,
         on_tool_status: Callable[[str, str], Any] | None = None,
         on_file_send: Callable[[str, str], Awaitable[str]] | None = None,
+        on_widget_send: Callable[[dict], Awaitable[str]] | None = None,
     ) -> tuple[list[dict], str]:
         """Run a full conversation turn with streaming and tool loop.
 
@@ -323,6 +325,8 @@ The memory file is at: {workspace}/memory.json
                         tool_desc = f"{cmd}: {path}"
                     elif tool_block.name == "send_file":
                         tool_desc = tool_block.input.get("path", "")
+                    elif tool_block.name == "send_telegram_widget":
+                        tool_desc = tool_block.input.get("type", "")
 
                     if on_tool_status and tool_desc:
                         await on_tool_status(tool_block.name, tool_desc)
@@ -332,6 +336,15 @@ The memory file is at: {workspace}/memory.json
                         result = await self._handle_send_file(
                             tool_block.input, user_id, on_file_send
                         )
+                    elif tool_block.name == "send_telegram_widget":
+                        if on_widget_send is None:
+                            result = "Error: Widget sending is not available in this context."
+                        else:
+                            try:
+                                result = await on_widget_send(tool_block.input)
+                            except Exception as e:
+                                logger.error(f"send_telegram_widget failed: {e}")
+                                result = f"Error sending widget: {e}"
                     else:
                         result = await execute_tool(
                             tool_block.name,
