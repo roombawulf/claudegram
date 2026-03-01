@@ -232,6 +232,14 @@ class BashSession:
 
             return _truncate_output(result.strip())
 
+    async def cancel(self):
+        """Kill any running command. Safe to call from outside the lock."""
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.kill()
+            except ProcessLookupError:
+                pass
+
     async def restart(self):
         """Kill and restart the bash session."""
         if self._process and self._process.returncode is None:

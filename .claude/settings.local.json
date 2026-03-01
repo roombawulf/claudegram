@@ -17,7 +17,10 @@
       "WebFetch(domain:files.svgcdn.io)",
       "Bash(open:*)",
       "Bash(python:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "WebFetch(domain:rob-blackbourn.medium.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:superfastpython.com)"
     ]
   }
 }

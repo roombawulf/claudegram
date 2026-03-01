@@ -16,6 +16,65 @@ TOKEN_ESTIMATE_DIVISOR = 4  # rough: 1 token ≈ 4 chars
 SUMMARIZE_THRESHOLD = 120_000  # tokens
 SUMMARIZE_OLDEST_RATIO = 0.6
 
+TOOL_USE_TYPES = {"tool_use", "server_tool_use"}
+
+
+def _sanitize_messages(messages: list[dict]) -> list[dict]:
+    """Remove orphaned tool_use blocks from conversation history.
+
+    The Anthropic API requires every tool_use block to have a corresponding
+    tool_result in the immediately following user message. If a tool_use block
+    was saved without its tool_result (e.g. from hitting max_rounds), strip it
+    to prevent 400 errors on subsequent turns.
+    """
+    sanitized = []
+    for i, msg in enumerate(messages):
+        if msg["role"] != "assistant" or not isinstance(msg.get("content"), list):
+            sanitized.append(msg)
+            continue
+
+        # Collect tool_use IDs in this assistant message
+        tool_use_ids = {
+            b["id"]
+            for b in msg["content"]
+            if isinstance(b, dict) and b.get("type") in TOOL_USE_TYPES and "id" in b
+        }
+
+        if not tool_use_ids:
+            sanitized.append(msg)
+            continue
+
+        # Check if the next message has matching tool_results
+        next_msg = messages[i + 1] if i + 1 < len(messages) else None
+        covered_ids: set[str] = set()
+        if next_msg and next_msg["role"] == "user" and isinstance(next_msg.get("content"), list):
+            covered_ids = {
+                b["tool_use_id"]
+                for b in next_msg["content"]
+                if isinstance(b, dict) and b.get("type") == "tool_result"
+            }
+
+        orphaned_ids = tool_use_ids - covered_ids
+        if not orphaned_ids:
+            sanitized.append(msg)
+            continue
+
+        # Strip orphaned tool_use blocks (and matching server_tool_result blocks)
+        clean = [
+            b for b in msg["content"]
+            if not (
+                isinstance(b, dict)
+                and b.get("type") in TOOL_USE_TYPES
+                and b.get("id") in orphaned_ids
+            )
+        ]
+        if clean:
+            sanitized.append({"role": "assistant", "content": clean})
+        else:
+            sanitized.append({"role": "assistant", "content": [{"type": "text", "text": "(tool execution)"}]})
+
+    return sanitized
+
 
 class ConversationManager:
     """Manage conversation state for a single user."""
@@ -63,8 +122,12 @@ class ConversationManager:
         self._messages_cache.append({"role": "user", "content": tool_results})
 
     def get_messages_for_api(self) -> list[dict]:
-        """Return messages formatted for the Anthropic API."""
-        return list(self._messages_cache)
+        """Return messages formatted for the Anthropic API.
+
+        Sanitizes the history to ensure no orphaned tool_use blocks exist
+        (which would cause a 400 error from the API).
+        """
+        return _sanitize_messages(list(self._messages_cache))
 
     def estimate_tokens(self) -> int:
         """Rough token count estimate for current conversation."""

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram import Update
+from telegram.ext import Application, BaseUpdateProcessor, CommandHandler, MessageHandler, filters
 
 from .claude_client import ClaudeClient
 from .config import Config
@@ -28,6 +30,58 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class InterruptibleProcessor(BaseUpdateProcessor):
+    """Interruptible per-user update processing.
+
+    When a user sends a new message while the bot is mid-turn, the active task
+    is cancelled, partial progress is preserved, and the new message starts a
+    fresh turn.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(max_concurrent_updates=256)
+        self._active: dict[int, asyncio.Task] = {}
+        self._cancel_events: dict[int, asyncio.Event] = {}
+
+    def get_cancel_event(self, user_id: int) -> asyncio.Event:
+        if user_id not in self._cancel_events:
+            self._cancel_events[user_id] = asyncio.Event()
+        return self._cancel_events[user_id]
+
+    async def do_process_update(self, update: Update, coroutine) -> None:
+        if not isinstance(update, Update) or not update.effective_user:
+            await coroutine
+            return
+
+        user_id = update.effective_user.id
+
+        # If there's an active task for this user, interrupt it
+        old = self._active.get(user_id)
+        if old and not old.done():
+            self.get_cancel_event(user_id).set()
+            old.cancel()
+            try:
+                await old
+            except (asyncio.CancelledError, Exception):
+                pass
+            self.get_cancel_event(user_id).clear()
+
+        task = asyncio.current_task()
+        self._active[user_id] = task
+        try:
+            await coroutine
+        finally:
+            if self._active.get(user_id) is task:
+                del self._active[user_id]
+
+    async def initialize(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        self._active.clear()
+        self._cancel_events.clear()
+
+
 async def post_init(app: Application) -> None:
     """Initialize all components after the application is built."""
     config = Config.from_env()
@@ -49,6 +103,7 @@ async def post_init(app: Application) -> None:
     app.bot_data["db"] = db
     app.bot_data["memory"] = memory
     app.bot_data["claude"] = claude
+    app.bot_data["update_processor"] = app.update_processor
 
     logger.info(
         "Bot initialized. Workspace: %s, Allowed users: %s",
@@ -82,6 +137,7 @@ def main() -> None:
     app = (
         Application.builder()
         .token(config.telegram_bot_token)
+        .concurrent_updates(InterruptibleProcessor())
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

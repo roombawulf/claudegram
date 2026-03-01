@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import platform
 import socket
@@ -195,6 +196,7 @@ The memory file is at: {workspace}/memory.json
         on_tool_status: Callable[[str, str], Any] | None = None,
         on_file_send: Callable[[str, str], Awaitable[str]] | None = None,
         on_widget_send: Callable[[dict], Awaitable[str]] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> tuple[list[dict], str]:
         """Run a full conversation turn with streaming and tool loop.
 
@@ -206,12 +208,20 @@ The memory file is at: {workspace}/memory.json
         max_tool_rounds = 20
 
         all_content_blocks: list[dict] = []
+        text_buffer = ""
 
         for round_num in range(max_tool_rounds):
+            # Check for cancellation between tool rounds
+            if cancel_event and cancel_event.is_set():
+                if text_buffer:
+                    all_content_blocks = [{"type": "text", "text": text_buffer}]
+                return all_content_blocks, "cancelled"
+
             text_buffer = ""
             content_blocks: list[dict] = []
             current_tool_input = ""
             current_tool_name = ""
+            cancelled_mid_stream = False
 
             try:
                 _inject_cache_breakpoints(messages)
@@ -223,6 +233,11 @@ The memory file is at: {workspace}/memory.json
                     messages=messages,
                 ) as stream:
                     async for event in stream:
+                        # Check for cancellation during streaming
+                        if cancel_event and cancel_event.is_set():
+                            cancelled_mid_stream = True
+                            break
+
                         if event.type == "content_block_start":
                             if event.content_block.type == "text":
                                 text_buffer = ""
@@ -240,6 +255,11 @@ The memory file is at: {workspace}/memory.json
 
                         elif event.type == "content_block_stop":
                             pass
+
+                    if cancelled_mid_stream:
+                        if text_buffer:
+                            all_content_blocks = [{"type": "text", "text": text_buffer}]
+                        return all_content_blocks, "cancelled"
 
                     # Get the final message for full content and usage
                     response = await stream.get_final_message()
@@ -365,7 +385,12 @@ The memory file is at: {workspace}/memory.json
             # Unknown stop reason
             return all_content_blocks, stop_reason
 
-        # Exceeded max rounds
+        # Exceeded max rounds — strip tool_use blocks since we won't
+        # provide results for them (prevents orphaned tool_use in history)
+        all_content_blocks = [
+            b for b in all_content_blocks
+            if not (isinstance(b, dict) and b.get("type") in ("tool_use", "server_tool_use"))
+        ]
         all_content_blocks.append({
             "type": "text",
             "text": "\n\n[Reached maximum tool execution rounds]",

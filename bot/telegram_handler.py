@@ -37,6 +37,33 @@ PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ANIMATION_EXTENSIONS = {".gif", ".webp"}
 
 
+async def _persist_intermediate_messages(
+    manager: ConversationManager, intermediate: list[dict]
+) -> None:
+    """Persist tool loop assistant+tool_result pairs to the conversation.
+
+    Only saves properly paired messages (assistant followed by user tool_result).
+    Skips unpaired assistant messages (e.g. from pause_turn server tool rounds).
+    """
+    i = 0
+    while i < len(intermediate):
+        msg = intermediate[i]
+        next_msg = intermediate[i + 1] if i + 1 < len(intermediate) else None
+
+        if (
+            msg["role"] == "assistant"
+            and next_msg is not None
+            and next_msg["role"] == "user"
+        ):
+            # Valid assistant + tool_result pair
+            await manager.add_assistant_message(msg["content"])
+            await manager.add_tool_result(next_msg["content"])
+            i += 2
+        else:
+            # Skip unpaired messages (e.g. pause_turn server tool rounds)
+            i += 1
+
+
 def _make_file_sender(chat):
     """Create an on_file_send callback bound to a Telegram chat."""
 
@@ -273,11 +300,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Build messages for API
     messages = manager.get_messages_for_api()
+    original_msg_count = len(messages)
     conv_id = manager._conversation_id
 
     widget_sender = _make_widget_sender(
         update.message.chat, update.message, streamer, context.bot,
     )
+
+    # Get cancel event from the update processor
+    processor = context.bot_data.get("update_processor")
+    cancel_event = processor.get_cancel_event(user_id) if processor else None
 
     try:
         # Run the conversation turn
@@ -290,10 +322,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             on_tool_status=streamer.on_tool_status,
             on_file_send=_make_file_sender(update.message.chat),
             on_widget_send=widget_sender,
+            cancel_event=cancel_event,
         )
+    except asyncio.CancelledError:
+        content_blocks = []
+        stop_reason = "cancelled"
     except Exception:
         streamer.stop()
         raise
+
+    if stop_reason == "cancelled":
+        # Kill any running bash command
+        bash = claude._get_bash_session(user_id)
+        await bash.cancel()
+
+        # Persist completed intermediate pairs
+        await _persist_intermediate_messages(manager, messages[original_msg_count:])
+
+        # Save partial response
+        partial = streamer.buffer
+        if partial:
+            await manager.add_assistant_message(
+                [{"type": "text", "text": partial + "\n\n[interrupted]"}]
+            )
+            await streamer.finalize(partial + "\n\n_[interrupted]_")
+        else:
+            streamer.stop()
+        return
+
+    # Persist intermediate tool loop messages (assistant+tool_result pairs)
+    await _persist_intermediate_messages(manager, messages[original_msg_count:])
 
     # Extract final text
     final_text = ""
@@ -301,8 +359,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if isinstance(block, dict) and block.get("type") == "text":
             final_text += block["text"]
 
-    # Store assistant response
-    await manager.add_assistant_message(content_blocks, model=model)
+    # Store assistant response (strip any tool_use blocks — they belong to
+    # intermediate messages which were already persisted above)
+    save_blocks = [
+        b for b in content_blocks
+        if not (isinstance(b, dict) and b.get("type") in ("tool_use", "server_tool_use"))
+    ]
+    if not save_blocks:
+        save_blocks = [{"type": "text", "text": final_text or "(Completed)"}]
+    await manager.add_assistant_message(save_blocks, model=model)
 
     # Finalize the streamed message
     await streamer.finalize(final_text or "(No text response)")
@@ -362,14 +427,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     messages = manager.get_messages_for_api()
+    original_msg_count = len(messages)
     conv_id = manager._conversation_id
 
     widget_sender = _make_widget_sender(
         update.message.chat, update.message, streamer, context.bot,
     )
 
+    processor = context.bot_data.get("update_processor")
+    cancel_event = processor.get_cancel_event(user_id) if processor else None
+
     try:
-        content_blocks, _ = await claude.run_conversation_turn(
+        content_blocks, stop_reason = await claude.run_conversation_turn(
             messages=messages,
             model=model,
             user_id=user_id,
@@ -378,17 +447,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             on_tool_status=streamer.on_tool_status,
             on_file_send=_make_file_sender(update.message.chat),
             on_widget_send=widget_sender,
+            cancel_event=cancel_event,
         )
+    except asyncio.CancelledError:
+        content_blocks = []
+        stop_reason = "cancelled"
     except Exception:
         streamer.stop()
         raise
+
+    if stop_reason == "cancelled":
+        bash = claude._get_bash_session(user_id)
+        await bash.cancel()
+        await _persist_intermediate_messages(manager, messages[original_msg_count:])
+        partial = streamer.buffer
+        if partial:
+            await manager.add_assistant_message(
+                [{"type": "text", "text": partial + "\n\n[interrupted]"}]
+            )
+            await streamer.finalize(partial + "\n\n_[interrupted]_")
+        else:
+            streamer.stop()
+        return
+
+    await _persist_intermediate_messages(manager, messages[original_msg_count:])
 
     final_text = ""
     for block in content_blocks:
         if isinstance(block, dict) and block.get("type") == "text":
             final_text += block["text"]
 
-    await manager.add_assistant_message(content_blocks, model=model)
+    save_blocks = [
+        b for b in content_blocks
+        if not (isinstance(b, dict) and b.get("type") in ("tool_use", "server_tool_use"))
+    ]
+    if not save_blocks:
+        save_blocks = [{"type": "text", "text": final_text or "(Completed)"}]
+    await manager.add_assistant_message(save_blocks, model=model)
     await streamer.finalize(final_text or "(No text response)")
 
 
@@ -433,14 +528,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     messages = manager.get_messages_for_api()
+    original_msg_count = len(messages)
     conv_id = manager._conversation_id
 
     widget_sender = _make_widget_sender(
         update.message.chat, update.message, streamer, context.bot,
     )
 
+    processor = context.bot_data.get("update_processor")
+    cancel_event = processor.get_cancel_event(user_id) if processor else None
+
     try:
-        content_blocks, _ = await claude.run_conversation_turn(
+        content_blocks, stop_reason = await claude.run_conversation_turn(
             messages=messages,
             model=model,
             user_id=user_id,
@@ -449,15 +548,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             on_tool_status=streamer.on_tool_status,
             on_file_send=_make_file_sender(update.message.chat),
             on_widget_send=widget_sender,
+            cancel_event=cancel_event,
         )
+    except asyncio.CancelledError:
+        content_blocks = []
+        stop_reason = "cancelled"
     except Exception:
         streamer.stop()
         raise
+
+    if stop_reason == "cancelled":
+        bash = claude._get_bash_session(user_id)
+        await bash.cancel()
+        await _persist_intermediate_messages(manager, messages[original_msg_count:])
+        partial = streamer.buffer
+        if partial:
+            await manager.add_assistant_message(
+                [{"type": "text", "text": partial + "\n\n[interrupted]"}]
+            )
+            await streamer.finalize(partial + "\n\n_[interrupted]_")
+        else:
+            streamer.stop()
+        return
+
+    await _persist_intermediate_messages(manager, messages[original_msg_count:])
 
     final_text = ""
     for block in content_blocks:
         if isinstance(block, dict) and block.get("type") == "text":
             final_text += block["text"]
 
-    await manager.add_assistant_message(content_blocks, model=model)
+    save_blocks = [
+        b for b in content_blocks
+        if not (isinstance(b, dict) and b.get("type") in ("tool_use", "server_tool_use"))
+    ]
+    if not save_blocks:
+        save_blocks = [{"type": "text", "text": final_text or "(Completed)"}]
+    await manager.add_assistant_message(save_blocks, model=model)
     await streamer.finalize(final_text or "(No text response)")
